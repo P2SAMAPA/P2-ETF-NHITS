@@ -97,8 +97,9 @@ universes2 = data2["universes"] if data2 and "error" not in data2 else None
 
 st.sidebar.markdown(f"**Run date:** `{data1.get('run_date','?')}`")
 
-tab1, tab2, tab3 = st.tabs([
-    "🏆 Best Window per ETF", "🔍 Explore by Window", "📊 Diagnostic Validity",
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🏆 Best Window per ETF", "🔍 Explore by Window",
+    "📊 Diagnostic Validity", "🎯 Walk-Forward Validation",
 ])
 
 
@@ -380,4 +381,94 @@ both **stride-H** (non-overlapping — the defensible number) and
         "than its Low tercile — i.e. it's doing real work identifying when "
         "path_signal should be trusted. A spread near zero means it doesn't "
         "discriminate skill, regardless of the raw IC values in isolation."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Walk-Forward Validation (true out-of-sample)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.header("🎯 Walk-Forward Validation — True Out-of-Sample Test")
+
+    wf_path = find_latest(files, "walkforward_backtest_")
+    if not wf_path:
+        st.warning(
+            "No walk-forward backtest found yet. This is a separate, on-demand "
+            "analysis that retrains N-HiTS at every historical point using only "
+            "data available as of that date — genuinely out-of-sample, unlike "
+            "the in-sample check in the previous tab. Trigger the "
+            "**\"N-HiTS Walk-Forward Backtest\"** workflow manually from the "
+            "GitHub Actions tab to generate it."
+        )
+        st.stop()
+
+    wf = load_json(wf_path)
+    if "error" in wf:
+        st.error(f"Error loading walk-forward backtest: {wf['error']}")
+        st.stop()
+
+    with st.expander("Methodology", expanded=True):
+        st.markdown("""
+Unlike the **📊 Diagnostic Validity** tab (which evaluates an already-trained
+model in-sample, on the same data it was trained on), this tab retrains
+N-HiTS **at every historical walk-forward point using only data available
+as of that date** — prices are truncated, so there is no lookahead — then
+checks the forecast against the return that actually, subsequently
+happened.
+
+This is the more expensive but more trustworthy test. If the numbers here
+are noticeably weaker than the in-sample tab, that's expected: it means
+some of the in-sample correlation was the model fitting its own training
+set rather than genuine predictive skill.
+        """)
+
+    st.markdown(
+        f"**Run date:** `{wf.get('run_date','?')}`  ·  "
+        f"**Universe:** `{wf.get('universe','?')}`  ·  "
+        f"**Window:** {wf.get('window','?')}d  ·  "
+        f"**Step:** {wf.get('step','?')}d  ·  "
+        f"**Tickers:** {len(wf.get('tickers_used', []))}"
+    )
+    date_range = wf.get("as_of_date_range", ["?", "?"])
+    st.caption(f"As-of dates spanning {date_range[0]} → {date_range[1]}  ·  "
+               f"{wf.get('total_rows','?')} walk-forward points")
+
+    overall_hit  = wf.get("overall_hit_rate")
+    overall_corr = wf.get("overall_corr")
+    m1, m2 = st.columns(2)
+    m1.metric("Overall hit rate", f"{overall_hit:.3f}" if overall_hit is not None else "N/A")
+    m2.metric("Overall corr(signal, realized)", f"{overall_corr:.3f}" if overall_corr is not None else "N/A")
+
+    winner = wf.get("winner")
+    fit_spread = wf.get("fit_quality_spread")
+    trend_spread = wf.get("trend_consistency_spread")
+    if winner:
+        st.success(
+            f"**More discriminating diagnostic (out-of-sample): `{winner}`**  "
+            f"(fit_quality High-vs-Low spread = {fit_spread:.4f}, "
+            f"trend_consistency High-vs-Low spread = {trend_spread:.4f})"
+        )
+
+    st.markdown("### By diagnostic tercile")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**By fit_quality tercile**")
+        rows = wf.get("fit_quality_terciles", [])
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No data")
+    with col2:
+        st.markdown("**By trend_consistency tercile**")
+        rows = wf.get("trend_consistency_terciles", [])
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No data")
+
+    st.caption(
+        "Compare these numbers against the 📊 Diagnostic Validity tab. A large "
+        "drop from in-sample to walk-forward is normal and expected — it's the "
+        "gap between how well the model fits its own training data and how "
+        "well it actually predicts what it hasn't seen."
     )
