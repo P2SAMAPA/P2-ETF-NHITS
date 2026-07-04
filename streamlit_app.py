@@ -179,6 +179,8 @@ score = 0.50*path_signal + 0.30*trend_consistency*sign(path_signal) + 0.20*fit_q
   <div class="etf-ticker">{etf['ticker']}</div>
   <div class="etf-score">N-HiTS score = {etf['nhits_score']:.4f}</div>
   <div class="etf-score">best window = {etf.get('best_window','N/A')}d</div>
+  <div class="etf-score">consistency = {etf.get('trend_consistency', float('nan')):.2f}</div>
+  <div class="etf-score">fit quality = {etf.get('fit_quality', float('nan')):.2f}</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -189,7 +191,12 @@ score = 0.50*path_signal + 0.30*trend_consistency*sign(path_signal) + 0.20*fit_q
                 for t, info in full.items():
                     score = info.get("score", info) if isinstance(info, dict) else info
                     win   = info.get("best_window", "N/A") if isinstance(info, dict) else "N/A"
-                    rows.append({"ETF": t, "N-HiTS Score": score, "Best Window (d)": win})
+                    cons  = info.get("trend_consistency", None) if isinstance(info, dict) else None
+                    fit   = info.get("fit_quality", None) if isinstance(info, dict) else None
+                    rows.append({
+                        "ETF": t, "N-HiTS Score": score, "Best Window (d)": win,
+                        "Trend Consistency": cons, "Fit Quality": fit,
+                    })
                 df = pd.DataFrame(rows).sort_values("N-HiTS Score", ascending=False)
                 st.dataframe(df, use_container_width=True, hide_index=True)
         st.divider()
@@ -263,13 +270,18 @@ with tab2:
   <div class="etf-ticker">{etf['ticker']}</div>
   <div class="etf-score">N-HiTS score = {etf['nhits_score']:.4f}</div>
   <div class="etf-score">window = {selected_win}d</div>
+  <div class="etf-score">consistency = {etf.get('trend_consistency', float('nan')):.2f}</div>
+  <div class="etf-score">fit quality = {etf.get('fit_quality', float('nan')):.2f}</div>
 </div>
 """, unsafe_allow_html=True)
 
         with st.expander(f"Full ranking — {label} @ {selected_win}d"):
             rows = win_data.get("full_ranking", [])
             if rows:
-                df = pd.DataFrame(rows, columns=["ETF", "N-HiTS Score"])
+                df = pd.DataFrame(
+                    rows,
+                    columns=["ETF", "N-HiTS Score", "Path Signal", "Trend Consistency", "Fit Quality"],
+                )
                 df.insert(0, "Rank", range(1, len(df) + 1))
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
