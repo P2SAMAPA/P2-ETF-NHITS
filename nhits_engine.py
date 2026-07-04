@@ -369,13 +369,22 @@ def compute_nhits_scores(
             + config.WEIGHT_CONSISTENCY * trend_consistency * sign
             + config.WEIGHT_FIT          * fit_quality
         )
-        raw_scores[ticker] = composite
+        raw_scores[ticker] = {
+            "composite": composite,
+            "path_signal": path_signal,
+            "trend_consistency": trend_consistency,
+            "fit_quality": fit_quality,
+        }
 
+    cols = ["score", "path_signal", "trend_consistency", "fit_quality"]
     if not raw_scores:
-        return pd.Series(dtype=float)
+        return pd.DataFrame(columns=cols)
 
-    scores = pd.Series(raw_scores)
-    mu_s, std_s = scores.mean(), scores.std()
+    df = pd.DataFrame(raw_scores).T
+    mu_s, std_s = df["composite"].mean(), df["composite"].std()
     if std_s < 1e-10:
-        return pd.Series(0.0, index=scores.index)
+        df["score"] = 0.0
+    else:
+        df["score"] = (df["composite"] - mu_s) / std_s
+    return df[cols]
     return (scores - mu_s) / std_s
