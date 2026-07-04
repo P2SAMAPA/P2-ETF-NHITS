@@ -97,7 +97,9 @@ universes2 = data2["universes"] if data2 and "error" not in data2 else None
 
 st.sidebar.markdown(f"**Run date:** `{data1.get('run_date','?')}`")
 
-tab1, tab2 = st.tabs(["🏆 Best Window per ETF", "🔍 Explore by Window"])
+tab1, tab2, tab3 = st.tabs([
+    "🏆 Best Window per ETF", "🔍 Explore by Window", "📊 Diagnostic Validity",
+])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -288,3 +290,94 @@ with tab2:
         st.divider()
 
     st.caption(f"Window: {selected_win}d · Run date: {data2.get('run_date','?')}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Diagnostic Validity
+# ══════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.header("📊 Diagnostic Validity — Does fit_quality or trend_consistency actually predict returns?")
+
+    diag_path = find_latest(files, "diagnostic_backtest_")
+    if not diag_path:
+        st.warning(
+            "No diagnostic backtest found yet. This is a separate, on-demand "
+            "analysis — it does not run on the daily schedule. Trigger the "
+            "**\"N-HiTS Diagnostic Backtest\"** workflow manually from the "
+            "GitHub Actions tab (`python backtest_diagnostics.py`) to generate it."
+        )
+        st.stop()
+
+    diag = load_json(diag_path)
+    if "error" in diag:
+        st.error(f"Error loading diagnostic backtest: {diag['error']}")
+        st.stop()
+
+    with st.expander("Methodology", expanded=True):
+        st.markdown("""
+For each (ticker, window), a model is trained exactly as `trainer.py` does
+in production, then evaluated **in-sample, across every timestep in its own
+training window** — this asks *"conditional on how a diagnostic looked at
+time t, was `path_signal(t)` more aligned with what happened at t+H?"*
+
+This is an in-sample diagnostic-validity check, not a claim about
+out-of-sample trading skill — see `backtest.py` in this repo for the more
+expensive true walk-forward version (retrains at every historical date
+using only data available as of that date).
+
+Consecutive rows share most of their target window, so results are shown
+both **stride-H** (non-overlapping — the defensible number) and
+**all-rows** (overlapping — larger sample, inflated, reference only).
+        """)
+
+    st.markdown(f"**Run date:** `{diag.get('run_date','?')}`  ·  "
+                f"**Rows:** {diag.get('total_rows_stride_h','?')} stride-H / "
+                f"{diag.get('total_rows_all_overlapping','?')} all-overlapping")
+
+    winner = diag.get("winner")
+    fit_spread = diag.get("fit_quality_spread")
+    trend_spread = diag.get("trend_consistency_spread")
+    if winner:
+        st.success(
+            f"**More discriminating diagnostic: `{winner}`**  "
+            f"(fit_quality High-vs-Low spread = {fit_spread:.4f}, "
+            f"trend_consistency High-vs-Low spread = {trend_spread:.4f})"
+        )
+
+    st.markdown("### Primary result — stride-H (non-overlapping)")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**By fit_quality tercile**")
+        rows = diag.get("fit_quality_terciles_primary", [])
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No data")
+    with col2:
+        st.markdown("**By trend_consistency tercile**")
+        rows = diag.get("trend_consistency_terciles_primary", [])
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No data")
+
+    with st.expander("Reference only — all overlapping rows (inflated, upward-biased)"):
+        col3, col4 = st.columns(2)
+        with col3:
+            st.markdown("**By fit_quality tercile**")
+            rows = diag.get("fit_quality_terciles_allrows_ref", [])
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        with col4:
+            st.markdown("**By trend_consistency tercile**")
+            rows = diag.get("trend_consistency_terciles_allrows_ref", [])
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.caption(
+        "A large positive High-vs-Low IC spread means that diagnostic's High "
+        "tercile has meaningfully higher correlation with realized returns "
+        "than its Low tercile — i.e. it's doing real work identifying when "
+        "path_signal should be trusted. A spread near zero means it doesn't "
+        "discriminate skill, regardless of the raw IC values in isolation."
+    )
