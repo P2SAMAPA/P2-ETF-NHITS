@@ -1,0 +1,41 @@
+name: N-HiTS Diagnostic Backtest (on-demand)
+
+# This is deliberately NOT run on the daily schedule. It retrains N-HiTS
+# across every ticker and window to answer a methodological question
+# (does fit_quality or trend_consistency better identify trustworthy
+# forecasts) that doesn't need re-answering every day, and costs far more
+# GitHub Actions minutes than the daily trainer.py run. Trigger manually
+# from the Actions tab, or uncomment a monthly schedule below if you want
+# it to re-validate periodically as more data accumulates.
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "0 2 1 * *"   # uncomment for a monthly re-validation run
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run diagnostic backtest
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python backtest_diagnostics.py
+
+      - name: Upload local report as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-backtest-report
+          path: |
+            results/diagnostic_backtest_report.md
+            results/diagnostic_backtest_raw.csv
