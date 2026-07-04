@@ -296,70 +296,126 @@ def _train_nhits(X: np.ndarray, Y: np.ndarray, rng: np.random.Generator) -> NHiT
 
 # ── Main scoring function ─────────────────────────────────────────────────────
 
+def prepare_ticker_training_data(prices: pd.DataFrame, ticker: str, window: int):
+    """
+    Build (X_norm, Y_norm, mu, sd) for one ticker/window — the exact same
+    data the production scorer trains on. Returns None if there isn't
+    enough history. Shared by compute_nhits_scores() and any offline
+    analysis/backtest script so the two never drift apart.
+    """
+    L, H = config.NHITS_LOOKBACK, config.PRED_HORIZON
+    if ticker not in prices.columns:
+        return None
+
+    ps = prices[ticker].dropna()
+    min_rows = window + H + L + config.NHITS_BATCH_SIZE * 2 + 5
+    if len(ps) < min_rows:
+        return None
+
+    log_ret = np.log(ps / ps.shift(1)).dropna().values
+    T = len(log_ret)
+    start = max(L, T - window - H)
+    end = T - H
+    n = end - start
+    if n < config.NHITS_BATCH_SIZE * 2:
+        return None
+
+    X = np.stack([log_ret[t - L:t] for t in range(start, end)])
+    Y = np.stack([log_ret[t:t + H] for t in range(start, end)])
+
+    seg = log_ret[start - L:end + H]
+    mu, sd = seg.mean(), seg.std() + 1e-8
+    X_norm = (X - mu) / sd
+    Y_norm = (Y - mu) / sd
+
+    return X_norm, Y_norm, mu, sd
+
+
+def forecast_and_diagnose(prices: pd.DataFrame, ticker: str, window: int, rng: np.random.Generator):
+    """
+    Train N-HiTS for one ticker using only data present in `prices` (the
+    caller controls the as-of cutoff simply by how much history `prices`
+    contains) and return {path_signal, trend_consistency, fit_quality} for
+    the forecast made from the LAST row of `prices`.
+
+    This is the single source of truth for per-ticker N-HiTS scoring —
+    used both by compute_nhits_scores() (today's live signal) and by
+    backtest.py (historical walk-forward, where `prices` is simply
+    truncated to simulate an earlier "today"). Returns None on failure.
+    """
+    L, H = config.NHITS_LOOKBACK, config.PRED_HORIZON
+
+    prepped = prepare_ticker_training_data(prices, ticker, window)
+    if prepped is None:
+        return None
+    X_norm, Y_norm, mu, sd = prepped
+
+    ps = prices[ticker].dropna()
+    log_ret = np.log(ps / ps.shift(1)).dropna().values
+
+    try:
+        model = _train_nhits(X_norm, Y_norm, rng)
+    except Exception as e:
+        print(f"    Failed {ticker}: {e}")
+        return None
+
+    x_today = ((log_ret[-L:] - mu) / sd)[None, :]
+    forecast_norm = model.forward(x_today)[0]
+    forecast_path = forecast_norm * sd + mu
+
+    path_signal = float(np.mean(forecast_path))
+    sign = np.sign(path_signal) if path_signal != 0 else 1.0
+    trend_consistency = float(np.mean(np.sign(forecast_path) == sign))
+
+    final_residual = model._final_residual[0]
+    fit_quality = float(1.0 - np.clip(
+        np.mean(final_residual ** 2) / (np.mean(x_today ** 2) + 1e-8), 0.0, 1.0
+    ))
+
+    return {
+        "path_signal": path_signal,
+        "trend_consistency": trend_consistency,
+        "fit_quality": fit_quality,
+        "sign": sign,
+    }
+
+
+# ── Main scoring function ─────────────────────────────────────────────────────
+
 def compute_nhits_scores(
     prices:    pd.DataFrame,
     macro_df:  pd.DataFrame,
     tickers:   List[str],
     window:    int,
-) -> pd.Series:
+) -> pd.DataFrame:
     """
     Train an N-HiTS model per ETF (pure univariate — no macro conditioning,
     faithful to the original architecture) and extract a multi-horizon
-    forecast signal. Returns cross-sectional z-scores.
+    forecast signal. Returns a DataFrame of score + diagnostics
+    (cross-sectional z-scored on the composite).
     """
     avail = [t for t in tickers if t in prices.columns]
     if not avail:
-        return pd.Series(dtype=float)
+        return pd.DataFrame(columns=["score", "path_signal", "trend_consistency", "fit_quality"])
 
     L, H = config.NHITS_LOOKBACK, config.PRED_HORIZON
     min_rows = window + H + L + config.NHITS_BATCH_SIZE * 2 + 5
     if len(prices) < min_rows:
-        return pd.Series(dtype=float)
+        return pd.DataFrame(columns=["score", "path_signal", "trend_consistency", "fit_quality"])
 
     rng = np.random.default_rng(42)
     raw_scores = {}
 
     for ticker in avail:
-        ps = prices[ticker].dropna()
-        if len(ps) < min_rows:
+        print(f"    Training N-HiTS for {ticker}")
+        diag = forecast_and_diagnose(prices, ticker, window, rng)
+        if diag is None:
             continue
 
-        log_ret = np.log(ps / ps.shift(1)).dropna().values
-        T = len(log_ret)
-        start = max(L, T - window - H)
-        end = T - H
-        n = end - start
-        if n < config.NHITS_BATCH_SIZE * 2:
-            continue
-
-        X = np.stack([log_ret[t - L:t] for t in range(start, end)])
-        Y = np.stack([log_ret[t:t + H] for t in range(start, end)])
-
-        seg = log_ret[start - L:end + H]
-        mu, sd = seg.mean(), seg.std() + 1e-8
-        X_norm = (X - mu) / sd
-        Y_norm = (Y - mu) / sd
-
-        print(f"    Training N-HiTS for {ticker} (N={n})")
-        try:
-            model = _train_nhits(X_norm, Y_norm, rng)
-        except Exception as e:
-            print(f"    Failed {ticker}: {e}")
-            continue
-
-        # ── Inference: forecast the next H steps from today's lookback ────────
-        x_today = ((log_ret[-L:] - mu) / sd)[None, :]
-        forecast_norm = model.forward(x_today)[0]
-        forecast_path = forecast_norm * sd + mu
-
-        path_signal = float(np.mean(forecast_path))
-        sign = np.sign(path_signal) if path_signal != 0 else 1.0
-        trend_consistency = float(np.mean(np.sign(forecast_path) == sign))
-
-        final_residual = model._final_residual[0]
-        fit_quality = float(1.0 - np.clip(
-            np.mean(final_residual ** 2) / (np.mean(x_today ** 2) + 1e-8), 0.0, 1.0
-        ))
+        path_signal       = diag["path_signal"]
+        trend_consistency = diag["trend_consistency"]
+        fit_quality       = diag["fit_quality"]
+        sign              = diag["sign"]
 
         print(f"    {ticker}: path_signal={path_signal:.5f}  "
               f"consistency={trend_consistency:.3f}  fit={fit_quality:.3f}")
@@ -387,4 +443,3 @@ def compute_nhits_scores(
     else:
         df["score"] = (df["composite"] - mu_s) / std_s
     return df[cols]
-    return (scores - mu_s) / std_s
