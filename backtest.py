@@ -26,14 +26,24 @@ runtime scales with (number of tickers) x (history length / step). Use
 --tickers to test a subset first, and a larger --step for a full-universe
 run. Training hyperparameters are the same as production (config.py) so
 the result reflects what the live engine actually does.
+
+Results are saved locally to backtest_results.csv (full row-level detail)
+and a summary is pushed to HF as walkforward_backtest_{date}.json for the
+"🎯 Walk-Forward Validation" dashboard tab — the true out-of-sample
+counterpart to the in-sample "📊 Diagnostic Validity" tab.
 """
 
 import argparse
+import json
+from pathlib import Path
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 
 import config
 import data_manager
+import push_results
 from nhits_engine import forecast_and_diagnose
 
 
@@ -131,6 +141,35 @@ def tercile_analysis(df: pd.DataFrame, by: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def table_to_records(df: pd.DataFrame) -> list:
+    """Convert a tercile table to JSON-serializable records (handles Categorical dtype)."""
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, row in df.iterrows():
+        rec = {}
+        for k, v in row.items():
+            if isinstance(v, (np.floating, float)):
+                rec[k] = None if pd.isna(v) else float(v)
+            elif isinstance(v, (np.integer, int)):
+                rec[k] = int(v)
+            else:
+                rec[k] = str(v)
+        out.append(rec)
+    return out
+
+
+def ic_spread(table: pd.DataFrame):
+    """High-tercile corr minus Low-tercile corr — same comparability metric
+    used in backtest_diagnostics.py, so the two tabs can be read side by side."""
+    if table is None or table.empty:
+        return None
+    vals = table.set_index("Tercile")["Corr(signal, realized)"]
+    if "High" not in vals.index or "Low" not in vals.index:
+        return None
+    return float(vals["High"] - vals["Low"])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--universe", default="EQUITY_SECTORS", choices=list(config.UNIVERSES.keys()))
@@ -165,6 +204,39 @@ def main():
     overall_hit  = results["hit"].mean()
     overall_corr = results["path_signal"].corr(results["realized_forward_return"])
     print(f"Hit rate: {overall_hit:.3f}   Corr(signal, realized): {overall_corr:.3f}   N={len(results)}")
+
+    # ── JSON summary, pushed to HF so the dashboard can display it ────────────
+    today = datetime.now().strftime("%Y-%m-%d")
+    fit_spread   = ic_spread(fq)
+    trend_spread = ic_spread(tc)
+    winner = None
+    if fit_spread is not None and trend_spread is not None:
+        winner = "fit_quality" if abs(fit_spread) > abs(trend_spread) else "trend_consistency"
+
+    summary = {
+        "run_date": today,
+        "universe": args.universe,
+        "window": int(args.window),
+        "step": int(args.step),
+        "tickers_used": sorted(results["ticker"].unique().tolist()),
+        "as_of_date_range": [
+            str(results["as_of_date"].min()), str(results["as_of_date"].max()),
+        ],
+        "total_rows": int(len(results)),
+        "overall_hit_rate": None if pd.isna(overall_hit) else float(overall_hit),
+        "overall_corr": None if pd.isna(overall_corr) else float(overall_corr),
+        "fit_quality_terciles":       table_to_records(fq),
+        "trend_consistency_terciles": table_to_records(tc),
+        "fit_quality_spread":       fit_spread,
+        "trend_consistency_spread": trend_spread,
+        "winner": winner,
+    }
+
+    json_path = Path(f"results/walkforward_backtest_{today}.json")
+    json_path.parent.mkdir(exist_ok=True)
+    with open(json_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    push_results.push_daily_result(json_path)
 
 
 if __name__ == "__main__":
