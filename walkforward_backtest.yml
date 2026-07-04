@@ -1,0 +1,69 @@
+name: N-HiTS Walk-Forward Backtest (out-of-sample, on-demand)
+
+# Runs backtest.py — the TRUE walk-forward test: retrains N-HiTS at each
+# historical point using ONLY data available as of that date, then checks
+# against the REALIZED forward return once known. This is the expensive,
+# genuinely out-of-sample counterpart to diagnostic_backtest.yml's in-sample
+# check. Runtime scales with (number of tickers) x (history length / step),
+# so universe/window/step/tickers are exposed as inputs you set at trigger
+# time rather than hardcoded — start with a small --tickers subset and a
+# larger --step to gauge runtime before running a full universe.
+#
+# Pushes a summary to HuggingFace (walkforward_backtest_{date}.json) for the
+# "🎯 Walk-Forward Validation" dashboard tab, and uploads the full row-level
+# CSV as a workflow artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: "Universe to backtest"
+        required: true
+        default: "EQUITY_SECTORS"
+        type: choice
+        options:
+          - FI_COMMODITIES
+          - EQUITY_SECTORS
+          - COMBINED
+      window:
+        description: "Lookback window (trading days)"
+        required: true
+        default: "252"
+      step:
+        description: "Trading days between walk-forward retraining points (larger = faster, coarser)"
+        required: true
+        default: "15"
+      tickers:
+        description: "Optional space-separated ticker subset (leave blank for full universe)"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run walk-forward backtest
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python backtest.py \
+            --universe "${{ github.event.inputs.universe }}" \
+            --window "${{ github.event.inputs.window }}" \
+            --step "${{ github.event.inputs.step }}" \
+            ${{ github.event.inputs.tickers != '' && format('--tickers {0}', github.event.inputs.tickers) || '' }}
+
+      - name: Upload results as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: walkforward-backtest-results
+          path: backtest_results.csv
