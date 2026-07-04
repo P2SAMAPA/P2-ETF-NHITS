@@ -60,7 +60,7 @@ def main():
             print(f"\n  Window: {win}d")
 
             try:
-                scores = compute_nhits_scores(
+                scores_df = compute_nhits_scores(
                     prices   = prices,
                     macro_df = macro_df,
                     tickers  = available_tickers,
@@ -71,33 +71,55 @@ def main():
                 import traceback; traceback.print_exc()
                 continue
 
-            if scores.empty:
+            if scores_df.empty:
                 print("  No scores")
                 continue
 
-            score_dict    = {t: float(s) for t, s in scores.items() if not np.isnan(s)}
-            sorted_scores = sorted(score_dict.items(), key=lambda x: x[1], reverse=True)
+            score_records = {}
+            for t, row in scores_df.iterrows():
+                if np.isnan(row["score"]):
+                    continue
+                score_records[t] = {
+                    "score":             float(row["score"]),
+                    "path_signal":       float(row["path_signal"]),
+                    "trend_consistency": float(row["trend_consistency"]),
+                    "fit_quality":       float(row["fit_quality"]),
+                }
+
+            sorted_scores = sorted(score_records.items(), key=lambda x: x[1]["score"], reverse=True)
             print(f"  Top 3: {[t for t, _ in sorted_scores[:3]]}")
 
-            window_results[win] = score_dict
+            window_results[win] = score_records
 
-            for etf, score in score_dict.items():
-                if etf not in best_per_etf or abs(score) > abs(best_per_etf[etf][0]):
-                    best_per_etf[etf] = (float(score), win)
+            for etf, rec in score_records.items():
+                if etf not in best_per_etf or abs(rec["score"]) > abs(best_per_etf[etf]["score"]):
+                    best_per_etf[etf] = {**rec, "window": win}
 
         if not best_per_etf:
             all_results[universe_name] = {"top_etfs": [], "full_scores": {}, "run_date": today}
             all_windows[universe_name] = {"windows": {}, "run_date": today}
             continue
 
-        sorted_etfs = sorted(best_per_etf.items(), key=lambda x: x[1][0], reverse=True)
+        sorted_etfs = sorted(best_per_etf.items(), key=lambda x: x[1]["score"], reverse=True)
         top_etfs    = [
-            {"ticker": t, "nhits_score": float(s), "best_window": int(w)}
-            for t, (s, w) in sorted_etfs[:config.TOP_N]
+            {
+                "ticker": t,
+                "nhits_score": rec["score"],
+                "best_window": int(rec["window"]),
+                "path_signal": rec["path_signal"],
+                "trend_consistency": rec["trend_consistency"],
+                "fit_quality": rec["fit_quality"],
+            }
+            for t, rec in sorted_etfs[:config.TOP_N]
         ]
         full_scores = {
-            t: {"score": float(s), "best_window": int(w)}
-            for t, (s, w) in sorted_etfs
+            t: {
+                "score": rec["score"], "best_window": int(rec["window"]),
+                "path_signal": rec["path_signal"],
+                "trend_consistency": rec["trend_consistency"],
+                "fit_quality": rec["fit_quality"],
+            }
+            for t, rec in sorted_etfs
         }
         all_results[universe_name] = {
             "top_etfs": top_etfs, "full_scores": full_scores, "run_date": today
@@ -105,11 +127,22 @@ def main():
         print(f"\n  Final top {config.TOP_N}: {[e['ticker'] for e in top_etfs]}")
 
         windows_tab2 = {}
-        for win, score_dict in window_results.items():
-            sw = sorted(score_dict.items(), key=lambda x: x[1], reverse=True)
+        for win, score_records in window_results.items():
+            sw = sorted(score_records.items(), key=lambda x: x[1]["score"], reverse=True)
             windows_tab2[str(win)] = {
-                "top_etfs":    [{"ticker": t, "nhits_score": float(s)} for t, s in sw[:config.TOP_N]],
-                "full_ranking": [[t, float(s)] for t, s in sw],
+                "top_etfs": [
+                    {
+                        "ticker": t, "nhits_score": rec["score"],
+                        "path_signal": rec["path_signal"],
+                        "trend_consistency": rec["trend_consistency"],
+                        "fit_quality": rec["fit_quality"],
+                    }
+                    for t, rec in sw[:config.TOP_N]
+                ],
+                "full_ranking": [
+                    [t, rec["score"], rec["path_signal"], rec["trend_consistency"], rec["fit_quality"]]
+                    for t, rec in sw
+                ],
             }
         all_windows[universe_name] = {"windows": windows_tab2, "run_date": today}
 
