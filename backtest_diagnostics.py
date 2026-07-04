@@ -40,15 +40,20 @@ Treat STRIDE-H as the primary result.
 OUTPUT
 ------
 - results/diagnostic_backtest_raw.csv     — every (ticker, window, t) row
-- results/diagnostic_backtest_report.md   — tercile bucket tables + verdict
+- results/diagnostic_backtest_report.md   — tercile bucket tables + verdict (human-readable)
+- results/diagnostic_backtest_{date}.json — same tables, pushed to HF for the
+                                             "📊 Diagnostic Validity" dashboard tab
 """
 
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from datetime import datetime
+import json
 
 import config
 import data_manager
+import push_results
 from nhits_engine import prepare_ticker_training_data, _train_nhits, NHiTS
 
 
@@ -150,6 +155,24 @@ def tercile_ic_table(df: pd.DataFrame, bucket_col: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def table_to_records(df: pd.DataFrame) -> list:
+    """Convert a tercile table to JSON-serializable records (handles Categorical dtype)."""
+    if df.empty:
+        return []
+    out = []
+    for _, row in df.iterrows():
+        rec = {}
+        for k, v in row.items():
+            if isinstance(v, (np.floating, float)):
+                rec[k] = float(v)
+            elif isinstance(v, (np.integer, int)):
+                rec[k] = int(v)
+            else:
+                rec[k] = str(v)
+        out.append(rec)
+    return out
+
+
 def main():
     if not config.HF_TOKEN:
         print("HF_TOKEN not set — cannot load master data"); return
@@ -239,6 +262,31 @@ def main():
 
     print("\n" + report_text)
     print("\nSaved report to results/diagnostic_backtest_report.md")
+
+    # ── JSON summary, pushed to HF so the dashboard can display it ────────────
+    today = datetime.now().strftime("%Y-%m-%d")
+    winner = None
+    if fit_spread is not None and trend_spread is not None:
+        winner = "fit_quality" if abs(fit_spread) > abs(trend_spread) else "trend_consistency"
+
+    summary = {
+        "run_date": today,
+        "total_rows_all_overlapping": int(len(raw)),
+        "total_rows_stride_h": int(len(stride_df)),
+        "stride_h": int(H),
+        "fit_quality_terciles_primary":       table_to_records(fit_table_stride),
+        "trend_consistency_terciles_primary": table_to_records(trend_table_stride),
+        "fit_quality_terciles_allrows_ref":       table_to_records(fit_table_all),
+        "trend_consistency_terciles_allrows_ref": table_to_records(trend_table_all),
+        "fit_quality_spread":       None if fit_spread is None else float(fit_spread),
+        "trend_consistency_spread": None if trend_spread is None else float(trend_spread),
+        "winner": winner,
+    }
+
+    json_path = Path(f"results/diagnostic_backtest_{today}.json")
+    with open(json_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    push_results.push_daily_result(json_path)
 
 
 if __name__ == "__main__":
